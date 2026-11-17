@@ -47,6 +47,7 @@
 #include "gpu-sim.h"
 #include "histogram.h"
 #include "l2cache.h"
+#include "roofline_stats.h"
 #include "l2cache_trace.h"
 #include "mem_fetch.h"
 #include "mem_latency_stat.h"
@@ -668,6 +669,12 @@ void memory_sub_partition::process_l2_access_result(
     Trace::l2_request_event("CACHE_ACCEPT",
                             m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,
                             m_id, mf, cache_request_status_str(status));
+  }
+  if (status != RESERVATION_FAIL) {
+    const bool writeback = mf->get_access_type() == L1_WRBK_ACC ||
+                           mf->get_access_type() == L2_WRBK_ACC;
+    roofline_stats::add_l2(mf->is_write(), writeback,
+                           mf->get_data_size());
   }
   const bool write_sent = was_write_sent(events);
   const bool read_sent = was_read_sent(events);

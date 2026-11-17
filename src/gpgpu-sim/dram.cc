@@ -31,6 +31,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "dram.h"
+#include "roofline_stats.h"
 #include "dram_sched.h"
 #include "gpu-misc.h"
 #include "gpu-sim.h"
@@ -258,6 +259,10 @@ void dram_t::push(class mem_fetch *data) {
   dram_req_t *mrq =
       new dram_req_t(data, m_config->nbk, m_config->dram_bnk_indexing_policy,
                      m_memory_partition_unit->get_mgpu());
+
+  const bool writeback = data->get_access_type() == L1_WRBK_ACC ||
+                         data->get_access_type() == L2_WRBK_ACC;
+  roofline_stats::add_hbm(data->is_write(), writeback, data->get_data_size());
 
   data->set_status(IN_PARTITION_MC_INTERFACE_QUEUE,
                    m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);

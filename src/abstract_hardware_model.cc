@@ -355,6 +355,7 @@ void warp_inst_t::generate_mem_accesses() {
       }
       unsigned subwarp_size = m_config->warp_size / m_config->mem_warp_parts;
       unsigned total_accesses = 0;
+      unsigned physical_word_transactions = 0;
       for (unsigned subwarp = 0; subwarp < m_config->mem_warp_parts;
            subwarp++) {
         // data structures used per part warp
@@ -378,6 +379,13 @@ void warp_inst_t::generate_mem_accesses() {
             bank_accs[bank][word]++;
           }
         }
+
+        // Each unique bank/word pair is one physical 32-bit shared-memory
+        // transaction. Multiple lanes reading the same word are a broadcast
+        // and consume one transaction; bank conflicts serialize transactions
+        // but do not change their physical byte count.
+        for (const auto &bank : bank_accs)
+          physical_word_transactions += bank.second.size();
 
         if (m_config->shmem_limited_broadcast) {
           // step 2: look for and select a broadcast bank/word if one occurs
@@ -443,6 +451,7 @@ void warp_inst_t::generate_mem_accesses() {
       }
       assert(total_accesses > 0 &&
              total_accesses <= m_config->warp_size * vector_elements);
+      m_smem_physical_bytes = physical_word_transactions * m_config->WORD_SIZE;
       cycles = total_accesses;  // shared memory conflicts modeled as larger
                                 // initiation interval
       if (is_load()) {

@@ -1100,6 +1100,7 @@ class warp_inst_t : public inst_t {
     m_dsm_remote = false;
     m_smem_exposed = false;
     m_smem_got = 0;
+    m_smem_physical_bytes = 0;
     m_current_lane = 0;
     m_dsm_atomic_lanes.reset();
   }
@@ -1133,6 +1134,7 @@ class warp_inst_t : public inst_t {
     m_dsm_remote = false;
     m_smem_exposed = false;
     m_smem_got = 0;
+    m_smem_physical_bytes = 0;
     m_current_lane = 0;
     m_dsm_atomic_lanes.reset();
   }
@@ -1383,6 +1385,7 @@ class warp_inst_t : public inst_t {
   bool m_dsm_remote;
   bool m_smem_exposed;
   unsigned m_smem_got;
+  unsigned m_smem_physical_bytes;
   bool is_dsm_remote() const { return m_dsm_remote; }
   void set_dsm_remote(bool remote) { m_dsm_remote = remote; }
 };

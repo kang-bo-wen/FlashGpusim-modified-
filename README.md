@@ -17,6 +17,10 @@
   - [Update Configuration](#update-configuration)
   - [Set CPU Threads](#set-cpu-threads)
   - [Inspect Statistics](#inspect-statistics)
+- [Hierarchical Memory Traffic](#hierarchical-memory-traffic)
+  - [Physical Traffic Counters](#physical-traffic-counters)
+  - [Instrumentation Points](#instrumentation-points)
+  - [Bandwidth Tutorials](#bandwidth-tutorials)
 - [Citation](#citation)
 - [License and Acknowledgements](#license-and-acknowledgements)
 
@@ -29,6 +33,7 @@ architectures and AI workloads, built upon GPGPU-Sim.
 | GPU features | TMA, TMEM, DSM, `tcgen05`, `mbarrier`, `mma`, `wgmma`, `ldmatrix`/`stmatrix`, etc. |
 | Workload tooling | [TritonTrace](tools/README.md) kernel capture and standalone replay ([examples and validation](tests/dsl/triton/README.md)) |
 | Simulation | Execution-driven functional simulation and cycle-level timing simulation |
+| Memory analysis | Physical L1D + Shared, L2, and HBM traffic counters for hierarchical Roofline and bandwidth studies |
 | Parallelism | OpenMP-based multi-threaded SM simulation |
 
 DSM is currently enabled only in `SM90_H200`. DSM support for other presets and H200 timing calibration for general workloads are under development.
@@ -333,6 +338,82 @@ python3 tests/scripts/extract_sim_stats.py tutorials/vectorAdd/run/simulation.lo
 The summary includes `simulated cycles`, `instructions`, `IPC`, `occupancy`,
 `cache statistics`, and `DRAM command counts`. Pass `--all` to inspect every
 statistics report or `--csv output.csv` to export the results.
+
+## Hierarchical Memory Traffic
+
+FlashGPU-Sim includes physical traffic instrumentation for hierarchical
+Roofline analysis and sustained-bandwidth studies. The implementation reports
+processor-side L1D requests plus physical shared-memory transactions, accepted
+L2 interface traffic, and requests entering the modeled HBM/DRAM queue.
+
+The complete implementation guide, counter semantics, source-code hooks, and
+validation methodology are documented in
+[`docs/hierarchical-traffic.md`](docs/hierarchical-traffic.md).
+
+### Physical Traffic Counters
+
+The final simulation statistics include:
+
+```text
+roofline_l1_read_bytes
+roofline_l1_write_bytes
+roofline_l1_total_bytes
+roofline_l2_read_bytes
+roofline_l2_write_bytes
+roofline_l2_writeback_bytes
+roofline_l2_total_bytes
+roofline_hbm_read_bytes
+roofline_hbm_write_bytes
+roofline_hbm_writeback_bytes
+roofline_hbm_total_bytes
+```
+
+The current L1 statistic combines **L1D + Shared** physical traffic. Shared
+memory is counted as unique `(bank, 32-bit word)` transactions multiplied by
+four bytes. L2 and HBM distinguish ordinary writes from dirty writebacks.
+
+For an SM core clock of 1.5 GHz, convert a counter to decimal GB/s with:
+
+```text
+physical bandwidth (GB/s) = physical bytes × 1.5 / gpu_tot_sim_cycle
+```
+
+Report complete algorithmic bytes separately when evaluating useful operator
+bandwidth. HBM physical output bytes can be lower than complete output bytes
+because dirty cache lines may remain resident in L2 at kernel completion.
+
+### Instrumentation Points
+
+The instrumentation modifies these simulator paths:
+
+| File | Purpose |
+| --- | --- |
+| `src/gpgpu-sim/roofline_stats.h` | Atomic counter storage, reset helpers, and final log output |
+| `src/abstract_hardware_model.h` | Per-instruction shared-memory physical-byte field |
+| `src/abstract_hardware_model.cc` | Counts unique shared bank/word transactions |
+| `src/gpgpu-sim/shader.cc` | Records accepted L1D requests and shared transactions |
+| `src/gpgpu-sim/l2cache.cc` | Records accepted L2 reads, writes, and writebacks |
+| `src/gpgpu-sim/dram.cc` | Records requests entering the DRAM request queue |
+
+The counters use relaxed atomics because SM simulation can run on multiple
+OpenMP host threads. The provided experiments launch each measured variant in
+a separate process; call `roofline_stats::reset()` before a new measurement
+interval if multiple independent kernels are measured in one process.
+
+### Bandwidth Tutorials
+
+Two focused tutorials are included:
+
+- [`tutorials/memory-bound-ops/`](tutorials/memory-bound-ops/) evaluates copy
+  and matrix-transpose kernels using complete useful bandwidth and physical
+  L1D + Shared, L2, and HBM traffic.
+- [`tutorials/bandwidth-benchmarks/`](tutorials/bandwidth-benchmarks/) contains
+  reusable sustained-throughput microbenchmarks and retained measured values.
+
+Both tutorials use a cold configuration with
+`-gpgpu_perf_sim_memcpy 0` to prevent performance-simulated host-to-device
+copies from prewarming L2. See their local README files for build commands,
+benchmark parameters, retained results, and interpretation limits.
 
 ## Citation
 

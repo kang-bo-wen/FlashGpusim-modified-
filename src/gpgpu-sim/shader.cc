@@ -31,6 +31,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "shader.h"
+#include "roofline_stats.h"
 #include "flash/cluster_fatal.h"
 #include <float.h>
 #include <limits.h>
@@ -3607,6 +3608,9 @@ bool ldst_unit::shared_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
     if (!bytes) bytes = 4;
     auto &svc = m_core->smem_service();
     if (!inst.m_smem_exposed) {
+      // Count physical shared-memory traffic once: unique bank/word
+      // transactions computed during memory-access generation.
+      roofline_stats::add_l1(inst.is_store(), inst.m_smem_physical_bytes);
       svc.expose(shared_memory_service_t::LSU, bytes);
       inst.m_smem_exposed = true;
       stall = true;
@@ -3623,8 +3627,9 @@ bool ldst_unit::shared_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
     fail_type = S_MEM;
     rc_fail = BK_CONF;
     m_stats->gpgpu_n_shmem_bkconflict++;
-  } else
+  } else {
     rc_fail = NO_RC_FAIL;
+  }
   return !stall;
 }
 
@@ -3789,6 +3794,11 @@ void ldst_unit::L1_latency_queue_cycle() {
                         m_core->get_gpu()->gpu_sim_cycle +
                             m_core->get_gpu()->gpu_tot_sim_cycle,
                         events);
+
+      if (status != RESERVATION_FAIL) {
+        roofline_stats::add_l1(mf_next->is_write(),
+                               mf_next->get_data_size());
+      }
 
       bool write_sent = was_write_sent(events);
       bool read_sent = was_read_sent(events);
@@ -5278,6 +5288,7 @@ void gpgpu_sim::shader_print_cache_stats(FILE *fout) const {
             total_css.pending_hits);
     fprintf(fout, "\tL1D_total_cache_reservation_fails = %llu\n",
             total_css.res_fails);
+    roofline_stats::print(fout);
     total_css.print_port_stats(fout, "\tL1D_cache");
   }
 
