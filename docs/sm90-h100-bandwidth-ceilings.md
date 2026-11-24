@@ -1,10 +1,7 @@
 # SM90 H100 Memory-Hierarchy Bandwidth Ceilings
 
-This document records the calculation process and assumptions used for the memory-hierarchy bandwidth reference lines in:
-
-```text
-tutorials/memory-bound-ops/plot_transpose_bandwidth_rigorous.py
-```
+This document records the calculation process used by the maintained
+`tutorials/bandwidth-benchmarks/` suite.
 
 The hardware topology and clock parameters are taken from:
 
@@ -16,11 +13,16 @@ The resulting values are:
 
 | Level | Reference bandwidth | Classification |
 |---|---:|---|
-| L1D + Shared | 25.344 TB/s | Structural reference ceiling |
-| L2 | 8.704 TB/s | Structural reference ceiling |
-| HBM | 3.34976 TB/s | Configuration-derived theoretical bandwidth |
+| L1D request admission | 25.344 TB/s | Model-derived request-port ceiling |
+| Shared memory | Unbounded in release config | `-gpgpu_shmem_bytes_per_cycle 0` |
+| L2 data port | 8.704 TB/s | Sweep-port configuration ceiling |
+| L2 fill port | 8.704 TB/s | Sweep-port configuration ceiling |
+| HBM DRAM commands | 3.34976 TB/s | Model-derived command-service ceiling |
 
-> **Important:** The HBM value can be derived entirely from explicit configuration parameters. The L1D + Shared and L2 calculations additionally use assumed per-cycle transfer widths that are not directly declared as throughput parameters in `gpgpusim.config`. They should therefore be described as structural reference ceilings rather than NVIDIA-published hardware peaks.
+> **Important:** These are simulator-model ceilings, not NVIDIA-published
+> hardware specifications. L2 uses the explicit sector-port settings appended by
+> `tutorials/bandwidth-benchmarks/common.sh`; the SM90_H100 release preset
+> itself retains the legacy L2 port path.
 
 ## 1. Unit conversion
 
@@ -47,7 +49,7 @@ N × W bytes/cycle × f × 10^9 cycles/s
 
 Divide the GB/s result by 1000 to obtain decimal TB/s.
 
-## 2. L1D + Shared structural reference ceiling
+## 2. L1D request-admission ceiling
 
 ### 2.1 Parameters from the SM90 H100 configuration
 
@@ -75,17 +77,19 @@ The core frequency is:
 1500 MHz = 1.5 GHz
 ```
 
-### 2.2 Additional structural assumption
+### 2.2 Model service width
 
-The calculation assumes a transfer width of:
+The L1 latency queue accepts at most one request per configured bank per core
+tick. SM90_H100 configures four banks, and sector-coalesced requests carry 32
+bytes. Therefore the modeled request-admission width is:
 
 ```text
-128 bytes/cycle/SM
+4 banks × 32 bytes = 128 bytes/core tick/SM
 ```
 
-This is an external structural-throughput assumption used by the plotting analysis. It is not directly declared as an L1D or Shared throughput parameter in `gpgpusim.config`.
-
-In particular, the `128` in the following cache configuration describes cache geometry, including the cache-line size; it does not by itself prove a throughput of 128 bytes per cycle:
+This result comes from `-gpgpu_l1_banks 4`, the 32-byte sector size, and the
+four-bank admission loop in `ldst_unit::process_memory_access_queue_l1cache`.
+It does not come from the `128` cache-line-size field in:
 
 ```text
 -gpgpu_cache:dl1 S:4:128:256,L:T:m:L:L,A:384:48,32:0,32
@@ -112,7 +116,7 @@ Multiply by the 1.5 GHz core clock:
 Thus:
 
 ```text
-L1D + Shared reference ceiling = 25.344 TB/s
+L1D request-admission ceiling = 25.344 TB/s
 ```
 
 The corresponding plotting constant is:
@@ -123,15 +127,12 @@ l1_reference_gbs = 25344.0
 
 ### 2.4 Interpretation limitation
 
-The instrumented statistic combines:
+This ceiling applies only to `roofline_l1d_request_total_bytes`. Shared memory
+is a separate resource. In the release configuration
+`-gpgpu_shmem_bytes_per_cycle 0` means its byte service is unlimited, so the
+model does not currently define a finite shared-memory byte-bandwidth ceiling.
 
-```text
-L1D global/local request traffic + Shared-memory physical traffic
-```
-
-L1D and Shared memory do not necessarily consume one identical, unified physical data path. Consequently, 25.344 TB/s is a normalization reference for the combined counter, not a strict unified hardware peak.
-
-## 3. L2 structural reference ceiling
+## 3. L2 explicit sector-port ceilings
 
 ### 3.1 Parameters from the SM90 H100 configuration
 
@@ -154,15 +155,20 @@ The L2 frequency is:
 1700 MHz = 1.7 GHz
 ```
 
-### 3.2 Additional structural assumption
+### 3.2 Benchmark configuration
 
-The calculation assumes a transfer width of:
+The maintained benchmark scripts append the following explicit port settings:
 
 ```text
-32 bytes/cycle/L2 subpartition
+-gpgpu_l2_multi_issue_port_model 1
+-gpgpu_l2_data_port_sectors_per_cycle 1
+-gpgpu_l2_data_port_cycle_period 1
+-gpgpu_l2_fill_port_sectors_per_cycle 1
+-gpgpu_l2_shared_data_array 0
 ```
 
-This transfer width is an analysis assumption. It is not directly specified as an L2 throughput parameter in `gpgpusim.config`.
+One sector is 32 bytes. Thus both independent ports have an explicit width of
+32 bytes per L2 tick per subpartition.
 
 ### 3.3 Calculation
 
@@ -185,7 +191,7 @@ Multiply by the 1.7 GHz L2 clock:
 Thus:
 
 ```text
-L2 reference ceiling = 8.704 TB/s
+L2 data-port ceiling = 8.704 TB/s
 ```
 
 The corresponding plotting constant is:
@@ -196,11 +202,11 @@ l2_theoretical_gbs = 8704.0
 
 ### 3.4 Interpretation limitation
 
-The configuration directly provides the channel count, subpartition count, and L2 clock. However, the 32-byte-per-cycle transfer width is an additional assumption. The result should therefore be described as:
+The result should therefore be described as:
 
 ```text
-An L2 structural reference ceiling based on the SM90_H100 topology
-and an assumed 32 bytes/cycle/subpartition transfer width.
+The L2 data-port ceiling (and independently the fill-port ceiling) for the
+explicit benchmark port configuration.
 ```
 
 ## 4. HBM configuration-derived theoretical bandwidth
@@ -223,19 +229,20 @@ Data-command frequency ratio    = 2
 DRAM clock                      = 2617 MHz = 2.617 GHz
 ```
 
-The effective transfer width per channel per DRAM clock is:
+Each issued column command transfers `dram_atom_size`:
 
 ```text
-8 bytes × 2 = 16 bytes/cycle/channel
+BL × busW × chips/controller = 4 × 8 × 1 = 32 bytes/command
 ```
 
 ### 4.2 Calculation
 
-Total transfer width across all memory channels:
+The minimum same-direction column-command spacing is `tCCD = 2` DRAM ticks.
+The aggregate command-service width is therefore:
 
 ```text
-80 channels × 16 bytes/cycle/channel
-= 1,280 bytes/cycle
+80 channels × 32 bytes/command ÷ 2 ticks/command
+= 1,280 bytes/DRAM tick
 ```
 
 Multiply by the 2.617 GHz DRAM clock:
@@ -250,7 +257,7 @@ Multiply by the 2.617 GHz DRAM clock:
 Equivalently, in one expression:
 
 ```text
-80 × 8 bytes × 2 × 2.617 GHz
+80 × 32 bytes ÷ 2 × 2.617 GHz
 = 3,349.76 GB/s
 = 3.34976 TB/s
 ```
@@ -267,7 +274,11 @@ The corresponding plotting constant is:
 hbm_theoretical_gbs = 3349.76
 ```
 
-Unlike the L1D + Shared and L2 calculations, every factor in this HBM formula is explicitly represented in the simulator configuration.
+Every factor is explicitly represented in the simulator configuration and in
+the `dram_t::issue_col_command()` service rule. The older expression
+`80 × busW × data_command_freq_ratio × clock` happens to give the same number
+for this preset, but it does not state the actual modeled event and should not
+be used as the general derivation.
 
 ## 5. Summary of sources and assumptions
 
@@ -277,25 +288,30 @@ Unlike the L1D + Shared and L2 calculations, every factor in this HBM formula is
 | Cores per cluster | 1 | `-gpgpu_n_cores_per_cluster` |
 | Number of SMs | 132 | Clusters × cores per cluster |
 | Core clock | 1.5 GHz | First value in `-gpgpu_clock_domains` |
-| L1D + Shared transfer width | 128 B/cycle/SM | Additional structural assumption |
+| L1D request width | 4 × 32 B/core tick/SM | L1 bank admission model |
 | Memory channels | 80 | `-gpgpu_n_mem` |
 | L2 subpartitions per channel | 2 | `-gpgpu_n_sub_partition_per_mchannel` |
 | Total L2 subpartitions | 160 | Channels × subpartitions per channel |
 | L2 clock | 1.7 GHz | Third value in `-gpgpu_clock_domains` |
-| L2 transfer width | 32 B/cycle/subpartition | Additional structural assumption |
+| L2 data/fill width | 1 × 32 B/L2 tick/subpartition | Sweep port settings |
 | DRAM clock | 2.617 GHz | Fourth value in `-gpgpu_clock_domains` |
 | DRAM bus width | 8 B/channel | `-gpgpu_dram_buswidth` |
-| Data frequency ratio | 2 | `-dram_data_command_freq_ratio` |
+| DRAM atom size | 32 B/column command | `BL × busW × chips/controller` |
+| Column-command spacing | 2 DRAM ticks | `tCCD` |
 
 ## 6. Recommended terminology
 
 Use the following descriptions in figures, reports, and discussions:
 
-- **L1D + Shared:** SM90_H100 structural reference ceiling.
-- **L2:** SM90_H100 structural reference ceiling.
-- **HBM:** SM90_H100 configuration-derived theoretical bandwidth.
+- **L1D:** SM90_H100 modeled request-admission ceiling.
+- **Shared:** no finite modeled byte ceiling while its budget is zero/unlimited.
+- **L2:** benchmark data-port or fill-port ceiling; name the port.
+- **HBM:** SM90_H100 modeled DRAM command-service ceiling.
 
-Avoid describing all three values as NVIDIA-published theoretical peaks. Only the HBM calculation is fully determined by explicit simulator configuration parameters; the L1D + Shared and L2 values include additional per-cycle transfer-width assumptions.
+Do not describe these values as NVIDIA-published theoretical peaks. They are
+ceilings of the configured simulator service rules. In particular, the L2
+number applies to the explicit benchmark port configuration rather than the legacy
+L2 path in the release preset.
 
 ## 7. Relation to measured bandwidth
 

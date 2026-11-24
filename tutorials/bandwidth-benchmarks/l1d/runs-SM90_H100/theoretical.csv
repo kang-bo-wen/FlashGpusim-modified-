@@ -1,0 +1,6 @@
+level,GBps,formula
+L1D request,25344.0,132 SM × 4 bank × 32 B × 1.5 GHz
+Shared bank,,budget=0 表示模型无限，无法定义有限峰值
+L2 data port,8704.0,160 slice × 1/1 sector/tick × 32 B × 1.7 GHz
+L2 fill port,8704.0,160 slice × 1 sector/tick × 32 B × 1.7 GHz
+HBM commands,3349.76,80 channel × 32 B/command ÷ tCCD 2 × 2.617 GHz

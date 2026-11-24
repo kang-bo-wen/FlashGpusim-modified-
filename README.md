@@ -33,7 +33,7 @@ architectures and AI workloads, built upon GPGPU-Sim.
 | GPU features | TMA, TMEM, DSM, `tcgen05`, `mbarrier`, `mma`, `wgmma`, `ldmatrix`/`stmatrix`, etc. |
 | Workload tooling | [TritonTrace](tools/README.md) kernel capture and standalone replay ([examples and validation](tests/dsl/triton/README.md)) |
 | Simulation | Execution-driven functional simulation and cycle-level timing simulation |
-| Memory analysis | Physical L1D + Shared, L2, and HBM traffic counters for hierarchical Roofline and bandwidth studies |
+| Memory analysis | Separate L1D request, Shared bank-word, L2 port, and HBM command traffic counters |
 | Parallelism | OpenMP-based multi-threaded SM simulation |
 
 DSM is currently enabled only in `SM90_H200`. DSM support for other presets and H200 timing calibration for general workloads are under development.
@@ -343,8 +343,8 @@ statistics report or `--csv output.csv` to export the results.
 
 FlashGPU-Sim includes physical traffic instrumentation for hierarchical
 Roofline analysis and sustained-bandwidth studies. The implementation reports
-processor-side L1D requests plus physical shared-memory transactions, accepted
-L2 interface traffic, and requests entering the modeled HBM/DRAM queue.
+processor-side L1D requests, physical shared-memory bank service, L2 data/fill
+port service, and issued HBM/DRAM column commands as separate observation points.
 
 The complete implementation guide, counter semantics, source-code hooks, and
 validation methodology are documented in
@@ -355,22 +355,29 @@ validation methodology are documented in
 The final simulation statistics include:
 
 ```text
-roofline_l1_read_bytes
-roofline_l1_write_bytes
-roofline_l1_total_bytes
-roofline_l2_read_bytes
-roofline_l2_write_bytes
-roofline_l2_writeback_bytes
-roofline_l2_total_bytes
-roofline_hbm_read_bytes
-roofline_hbm_write_bytes
-roofline_hbm_writeback_bytes
-roofline_hbm_total_bytes
+roofline_l1d_request_read_bytes
+roofline_l1d_request_write_bytes
+roofline_l1d_request_total_bytes
+roofline_shared_bank_read_bytes
+roofline_shared_bank_write_bytes
+roofline_shared_bank_total_bytes
+roofline_l2_data_read_hit_bytes
+roofline_l2_data_write_hit_bytes
+roofline_l2_data_miss_read_bytes
+roofline_l2_data_fill_bytes
+roofline_l2_data_dirty_eviction_bytes
+roofline_l2_data_port_total_bytes
+roofline_l2_fill_port_total_bytes
+roofline_hbm_command_read_bytes
+roofline_hbm_command_write_bytes
+roofline_hbm_command_writeback_bytes
+roofline_hbm_command_total_bytes
 ```
 
-The current L1 statistic combines **L1D + Shared** physical traffic. Shared
-memory is counted as unique `(bank, 32-bit word)` transactions multiplied by
-four bytes. L2 and HBM distinguish ordinary writes from dirty writebacks.
+L1D and Shared are deliberately separate resources. Shared memory is counted as
+unique `(bank, 32-bit word)` transactions multiplied by four bytes. L2 records
+actual sector service by port and work type; HBM records issued column-command
+payload rather than queue admission.
 
 For an SM core clock of 1.5 GHz, convert a counter to decimal GB/s with:
 
@@ -392,8 +399,8 @@ The instrumentation modifies these simulator paths:
 | `src/abstract_hardware_model.h` | Per-instruction shared-memory physical-byte field |
 | `src/abstract_hardware_model.cc` | Counts unique shared bank/word transactions |
 | `src/gpgpu-sim/shader.cc` | Records accepted L1D requests and shared transactions |
-| `src/gpgpu-sim/l2cache.cc` | Records accepted L2 reads, writes, and writebacks |
-| `src/gpgpu-sim/dram.cc` | Records requests entering the DRAM request queue |
+| `src/gpgpu-sim/l2cache.cc` | Records sectors actually served by L2 data and fill ports |
+| `src/gpgpu-sim/dram.cc` | Records payload for issued DRAM read/write column commands |
 
 The counters use relaxed atomics because SM simulation can run on multiple
 OpenMP host threads. The provided experiments launch each measured variant in
@@ -402,17 +409,15 @@ interval if multiple independent kernels are measured in one process.
 
 ### Bandwidth Tutorials
 
-Two focused tutorials are included:
+One focused bandwidth tutorial is included:
 
-- [`tutorials/memory-bound-ops/`](tutorials/memory-bound-ops/) evaluates copy
-  and matrix-transpose kernels using complete useful bandwidth and physical
-  L1D + Shared, L2, and HBM traffic.
 - [`tutorials/bandwidth-benchmarks/`](tutorials/bandwidth-benchmarks/) contains
-  reusable sustained-throughput microbenchmarks and retained measured values.
+  reproducible theoretical-ceiling derivation and steady-state tests for L1D,
+  L2, and HBM.
 
-Both tutorials use a cold configuration with
+The tutorial uses a cold configuration with
 `-gpgpu_perf_sim_memcpy 0` to prevent performance-simulated host-to-device
-copies from prewarming L2. See their local README files for build commands,
+copies from prewarming L2. See its local README for build commands,
 benchmark parameters, retained results, and interpretation limits.
 
 ## Citation

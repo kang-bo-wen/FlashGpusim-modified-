@@ -1,0 +1,3 @@
+interval,start_point,end_point,delta_bytes,delta_cycles,steady_slope_GBps,kernel_visible_theoretical_GBps,kernel_visible_utilization_pct,internal_port_theoretical_GBps,internal_port_utilization_pct
+l1-b528-i64 -> l1-b528-i128,l1-b528-i64,l1-b528-i128,553648128,32904,25239.247265,25344.000000,99.587,25344.000000,99.587
+l1-b528-i128 -> l1-b528-i256,l1-b528-i128,l1-b528-i256,1107296256,66133,25115.213040,25344.000000,99.097,25344.000000,99.097

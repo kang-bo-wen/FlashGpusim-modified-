@@ -1,3 +1,13 @@
 /hierarchy_bandwidth
 /runs/
+/runs-*/
+/l1d/runs-*/
+/l1d/archive-*/
+/l2/runs-*/
+/l2/archive-*/
+/hbm/runs-*/
+/hbm/archive-*/
+/legacy/
+/smoke/
 *.log
+__pycache__/

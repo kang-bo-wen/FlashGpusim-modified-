@@ -2408,6 +2408,10 @@ void gpgpu_sim::gpu_print_stat(unsigned long long streamID) {
            l2_port_stats.data_port_accepted_sectors);
     printf("L2_multi_issue_data_port_hit_sectors = %llu\n",
            l2_port_stats.data_port_hit_sectors);
+    printf("L2_multi_issue_data_port_read_hit_sectors = %llu\n",
+           l2_port_stats.data_port_read_hit_sectors);
+    printf("L2_multi_issue_data_port_write_hit_sectors = %llu\n",
+           l2_port_stats.data_port_write_hit_sectors);
     printf("L2_multi_issue_data_port_miss_read_sectors = %llu\n",
            l2_port_stats.data_port_miss_read_sectors);
     printf("L2_multi_issue_data_port_fill_sectors = %llu\n",

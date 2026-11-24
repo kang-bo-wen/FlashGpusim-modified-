@@ -1,4 +1,0 @@
-level,physical_bytes,cycles,measured_GBps,theoretical_GBps,theoretical_utilization_pct
-L1D + Shared,1108415616,137895,12057.170,25344.0,47.57
-L2,676495360,211563,4796.411,8704.0,55.11
-HBM,508599296,298581,2555.082,3349.76,76.28

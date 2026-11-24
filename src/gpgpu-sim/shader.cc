@@ -3610,7 +3610,8 @@ bool ldst_unit::shared_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
     if (!inst.m_smem_exposed) {
       // Count physical shared-memory traffic once: unique bank/word
       // transactions computed during memory-access generation.
-      roofline_stats::add_l1(inst.is_store(), inst.m_smem_physical_bytes);
+      roofline_stats::add_shared_bank(inst.is_store(),
+                                      inst.m_smem_physical_bytes);
       svc.expose(shared_memory_service_t::LSU, bytes);
       inst.m_smem_exposed = true;
       stall = true;
@@ -3796,8 +3797,8 @@ void ldst_unit::L1_latency_queue_cycle() {
                         events);
 
       if (status != RESERVATION_FAIL) {
-        roofline_stats::add_l1(mf_next->is_write(),
-                               mf_next->get_data_size());
+        roofline_stats::add_l1d_request(mf_next->is_write(),
+                                        mf_next->get_data_size());
       }
 
       bool write_sent = was_write_sent(events);

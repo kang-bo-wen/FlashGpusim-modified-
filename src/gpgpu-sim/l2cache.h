@@ -46,6 +46,8 @@
 #include <utility>
 #include <vector>
 
+#include "roofline_stats.h"
+
 // ROP-delay arbitration and accounting belong to the L2 sub-partition.
 enum rop_delay_output_stop_reason {
   ROP_DELAY_OUTPUT_NO_READY_WORK,
@@ -279,7 +281,8 @@ class rop_delay_output_queue {
 };
 
 enum l2_multi_issue_data_work {
-  L2_MULTI_ISSUE_HIT_DATA = 0,
+  L2_MULTI_ISSUE_READ_HIT_DATA = 0,
+  L2_MULTI_ISSUE_WRITE_HIT_DATA,
   L2_MULTI_ISSUE_DIRTY_EVICTION,
   L2_MULTI_ISSUE_MISS_READ,
 };
@@ -318,6 +321,8 @@ struct l2_multi_issue_port_stats {
   unsigned long long lookup_accepted_sectors;
   unsigned long long data_port_accepted_sectors;
   unsigned long long data_port_hit_sectors;
+  unsigned long long data_port_read_hit_sectors;
+  unsigned long long data_port_write_hit_sectors;
   unsigned long long data_port_dirty_eviction_sectors;
   unsigned long long data_port_fill_sectors;
   unsigned long long data_port_miss_read_sectors;
@@ -330,6 +335,8 @@ struct l2_multi_issue_port_stats {
       : lookup_accepted_sectors(0),
         data_port_accepted_sectors(0),
         data_port_hit_sectors(0),
+        data_port_read_hit_sectors(0),
+        data_port_write_hit_sectors(0),
         data_port_dirty_eviction_sectors(0),
         data_port_fill_sectors(0),
         data_port_miss_read_sectors(0),
@@ -342,6 +349,8 @@ struct l2_multi_issue_port_stats {
     lookup_accepted_sectors += rhs.lookup_accepted_sectors;
     data_port_accepted_sectors += rhs.data_port_accepted_sectors;
     data_port_hit_sectors += rhs.data_port_hit_sectors;
+    data_port_read_hit_sectors += rhs.data_port_read_hit_sectors;
+    data_port_write_hit_sectors += rhs.data_port_write_hit_sectors;
     data_port_dirty_eviction_sectors += rhs.data_port_dirty_eviction_sectors;
     data_port_fill_sectors += rhs.data_port_fill_sectors;
     data_port_miss_read_sectors += rhs.data_port_miss_read_sectors;
@@ -506,8 +515,22 @@ class l2_multi_issue_ports {
     const unsigned accepted = std::min(pending_sectors, m_data_remaining);
     m_data_remaining -= accepted;
     m_stats.data_port_accepted_sectors += accepted;
-    if (work == L2_MULTI_ISSUE_HIT_DATA)
+    roofline_stats::add_l2_data(
+        work == L2_MULTI_ISSUE_READ_HIT_DATA
+            ? roofline_stats::L2_READ_HIT
+            : (work == L2_MULTI_ISSUE_WRITE_HIT_DATA
+                   ? roofline_stats::L2_WRITE_HIT
+            : (work == L2_MULTI_ISSUE_MISS_READ
+                   ? roofline_stats::L2_MISS_READ
+                   : roofline_stats::L2_DIRTY_EVICTION)),
+        accepted);
+    if (work == L2_MULTI_ISSUE_READ_HIT_DATA ||
+        work == L2_MULTI_ISSUE_WRITE_HIT_DATA)
       m_stats.data_port_hit_sectors += accepted;
+    if (work == L2_MULTI_ISSUE_READ_HIT_DATA)
+      m_stats.data_port_read_hit_sectors += accepted;
+    else if (work == L2_MULTI_ISSUE_WRITE_HIT_DATA)
+      m_stats.data_port_write_hit_sectors += accepted;
     else if (work == L2_MULTI_ISSUE_MISS_READ)
       m_stats.data_port_miss_read_sectors += accepted;
     else
@@ -527,11 +550,13 @@ class l2_multi_issue_ports {
       m_data_remaining -= accepted;
       m_stats.data_port_accepted_sectors += accepted;
       m_stats.data_port_fill_sectors += accepted;
+      roofline_stats::add_l2_data(roofline_stats::L2_FILL, accepted);
       if (accepted < fill_eligible)
         record_once(m_stats.data_port_width_stall_cycles, m_data_stall_recorded);
     }
     m_fill_remaining -= accepted;
     m_stats.fill_port_accepted_sectors += accepted;
+    roofline_stats::add_l2_fill_port(accepted);
     if (fill_eligible < pending_sectors)
       record_once(m_stats.fill_port_width_stall_cycles, m_fill_stall_recorded);
     return accepted;

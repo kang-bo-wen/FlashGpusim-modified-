@@ -7,26 +7,41 @@ This document describes the FlashGPU-Sim changes used to report physical traffic
 The final simulator statistics include:
 
 ```text
-roofline_l1_read_bytes
-roofline_l1_write_bytes
-roofline_l1_total_bytes
-roofline_l2_read_bytes
-roofline_l2_write_bytes
-roofline_l2_writeback_bytes
-roofline_l2_total_bytes
-roofline_hbm_read_bytes
-roofline_hbm_write_bytes
-roofline_hbm_writeback_bytes
-roofline_hbm_total_bytes
+roofline_l1d_request_read_bytes
+roofline_l1d_request_write_bytes
+roofline_l1d_request_total_bytes
+roofline_shared_bank_read_bytes
+roofline_shared_bank_write_bytes
+roofline_shared_bank_total_bytes
+roofline_l2_data_read_hit_bytes
+roofline_l2_data_write_hit_bytes
+roofline_l2_data_hit_bytes
+roofline_l2_data_miss_read_bytes
+roofline_l2_data_fill_bytes
+roofline_l2_data_dirty_eviction_bytes
+roofline_l2_data_port_total_bytes
+roofline_l2_fill_port_total_bytes
+roofline_hbm_command_read_bytes
+roofline_hbm_command_write_bytes
+roofline_hbm_command_writeback_bytes
+roofline_hbm_command_total_bytes
 ```
 
-The current `L1` label is a combined **L1D + Shared** physical-traffic counter:
+The instrumentation exposes separate observation points rather than combining
+unlike resources:
 
-- Global/local memory requests are counted when an accepted processor-side request enters L1D.
-- Shared-memory traffic is counted as physical bank/word transactions.
-- Cache fills are not counted as new L1 processor requests.
+- `roofline_l1d_request_*` counts accepted processor-side L1D requests.
+- `roofline_shared_bank_*` counts unique shared bank/word service bytes.
+- `roofline_l2_data_read_hit_bytes` and `roofline_l2_data_write_hit_bytes`
+  separate hit service by the original request direction; their sum is the
+  compatibility `roofline_l2_data_hit_bytes`. Other `roofline_l2_data_*`
+  fields count miss-read, fill, and dirty-eviction sectors served by the port.
+- `roofline_l2_fill_port_total_bytes` counts sectors served by the fill port.
+- `roofline_hbm_command_*` counts bytes transferred by issued DRAM column commands.
 
-L2 counts accepted requests presented to the L2 interface. HBM counts requests entering the DRAM request queue.
+The compatibility `roofline_l1_total_bytes`, `roofline_l2_total_bytes`, and
+`roofline_hbm_total_bytes` aliases remain for old scripts, but new analysis
+should consume the explicit fields above.
 
 ## Files Changed
 
@@ -35,9 +50,11 @@ L2 counts accepted requests presented to the L2 interface. HBM counts requests e
 `src/gpgpu-sim/roofline_stats.h` defines thread-safe atomic counters and the helper functions:
 
 ```text
-roofline_stats::add_l1(...)
-roofline_stats::add_l2(...)
-roofline_stats::add_hbm(...)
+roofline_stats::add_l1d_request(...)
+roofline_stats::add_shared_bank(...)
+roofline_stats::add_l2_data(...)
+roofline_stats::add_l2_fill_port(...)
+roofline_stats::add_dram_command(...)
 roofline_stats::print(...)
 roofline_stats::reset(...)
 ```
@@ -70,24 +87,27 @@ shared physical bytes = unique (bank, 32-bit word) pairs × WORD_SIZE
 
 For the current configurations, `WORD_SIZE` is four bytes. This counts broadcast/coalescing behavior correctly and exposes bank-conflict traffic without multiplying every active lane by its nominal operand size.
 
-### L1D and Shared hook
+### L1D and Shared hooks
 
 In `src/gpgpu-sim/shader.cc`:
 
 - `ldst_unit::shared_cycle(...)` charges `m_smem_physical_bytes` once per shared-memory instruction. The existing `m_smem_exposed` flag prevents repeated charging while the instruction remains in the service pipeline.
 - `ldst_unit::L1_latency_queue_cycle()` charges `mem_fetch::get_data_size()` after the L1D access is accepted. Requests returning `RESERVATION_FAIL` are not counted until accepted.
 
-The resulting L1 statistic is intentionally named `L1D + Shared` in analysis figures. It is not a pure L1D-only counter.
+The two resources are printed separately and must not share a utilization denominator.
 
 ### L2 hook
 
-In `src/gpgpu-sim/l2cache.cc`, `memory_sub_partition::process_l2_access_result(...)` records `mem_fetch::get_data_size()` when the L2 access is accepted. `L1_WRBK_ACC` and `L2_WRBK_ACC` are classified as writeback traffic. Reservation failures are excluded until a later successful attempt.
+The multi-issue L2 port model records 32-byte sectors at the exact calls that
+consume hit, miss-read, fill, and dirty-eviction service. Request admission is
+not counted as data-array traffic.
 
 ### HBM hook
 
-In `src/gpgpu-sim/dram.cc`, `dram_t::push(mem_fetch *data)` records traffic as the request enters the DRAM request queue. The access is classified as read, write, or writeback from the `mem_fetch` access type.
+In `src/gpgpu-sim/dram.cc`, `dram_t::issue_col_command(...)` records one
+`dram_atom_size` transfer for each issued read or write column command.
 
-This point measures physical traffic delivered to the modeled HBM system, rather than CUDA-level requested bytes.
+This point matches the modeled DRAM data-command service rather than queue payload.
 
 ## Thread Safety
 
@@ -131,7 +151,7 @@ Useful bandwidth and physical hierarchy bandwidth answer different questions:
 
 1. **Kernel-end dirty data:** FlashGPU-Sim does not force all dirty L2 lines to HBM at kernel completion. Physical HBM writeback bytes can therefore be lower than complete output bytes.
 2. **Non-coalesced traffic:** A naive transpose can generate much more L1/L2 physical write traffic than its algorithmic output size. This is expected and is useful for identifying transaction amplification.
-3. **L1D + Shared:** The combined counter does not have a strict unified hardware peak. Treat its structural ceiling as a reference unless L1D and Shared are instrumented separately.
+3. **Separate resources:** L1D requests, shared banks, L2 data/fill ports, and HBM commands require separate ceilings.
 4. **Cold-cache runs:** Use `-gpgpu_perf_sim_memcpy 0` when host-to-device copies would otherwise prewarm L2 before the measured kernel.
 5. **Separate processes:** Use separate simulation processes for variants unless an explicit counter reset is added around the measurement interval.
 
@@ -144,17 +164,24 @@ Recommended validation workloads:
 - Padded tiled transpose: L2 traffic should return close to complete algorithmic input/output traffic.
 - Shared-memory loop: the measured shared bytes should match unique bank/word transactions multiplied by four bytes.
 
-For every test, verify:
+There is no universal byte inequality across these counters: L1D requests,
+shared bank service, L2 hit/fill service, and HBM commands observe different
+events and may amplify or bypass one another. Instead, verify the accounting
+identities at each observation point:
 
 ```text
-L1D + Shared bytes >= L2 bytes >= HBM bytes
+L1D request total = L1D request read + L1D request write
+L2 data-port total = read hit + write hit + miss read + fill + dirty eviction
+HBM command total = read + write + writeback
 ```
 
-This hierarchy is a useful sanity check, but exceptions can occur for specialized access paths or when comparing counters with different measurement intervals.
+For a controlled workload, also compare the relevant algorithmic bytes with the
+specific physical event it is intended to generate. Do not add Shared bytes to
+L1D bytes or compare unlike counters using one common ceiling.
 
 ## Included Tutorials
 
-- `tutorials/memory-bound-ops/` contains V0–V3 copy/transpose kernels, retained results, and the hierarchy comparison figure.
-- `tutorials/bandwidth-benchmarks/` contains reusable L1D+Shared, L2, and HBM sustained-throughput microbenchmarks.
+- `tutorials/bandwidth-benchmarks/` contains the maintained theoretical
+  derivation, saturation sweeps, plateau checks, and reproducibility guide.
 
 See the README in each directory for build commands, benchmark parameters, retained results, and limitations.

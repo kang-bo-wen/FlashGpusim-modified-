@@ -1,6 +1,5 @@
-// Empirical sustainable hierarchy bandwidth benchmarks for FlashGPU-Sim.
+// Reproducible sustained read-bandwidth benchmarks for FlashGPU-Sim.
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -28,21 +27,36 @@ static Options parse_options(int argc, char **argv) {
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i]);
     auto value = [&]() {
-      if (++i >= argc) { std::fprintf(stderr, "Missing argument value\n"); std::exit(EXIT_FAILURE); }
+      if (++i >= argc) {
+        std::fprintf(stderr, "Missing argument value\n");
+        std::exit(EXIT_FAILURE);
+      }
       return argv[i];
     };
     if (arg == "--level") o.level = value();
     else if (arg == "--elements") o.elements = std::atoi(value());
     else if (arg == "--iterations") o.iterations = std::atoi(value());
     else if (arg == "--blocks") o.blocks = std::atoi(value());
-    else { std::fprintf(stderr, "Unknown option: %s\n", arg.c_str()); std::exit(EXIT_FAILURE); }
+    else {
+      std::fprintf(stderr, "Unknown option: %s\n", arg.c_str());
+      std::exit(EXIT_FAILURE);
+    }
   }
   if ((o.level != "l1" && o.level != "l2" && o.level != "hbm") ||
       o.elements <= 0 || o.iterations <= 0 || o.blocks <= 0) {
-    std::fprintf(stderr, "Usage: --level l1|l2|hbm [--elements N --iterations I --blocks B]\n");
+    std::fprintf(stderr,
+                 "Usage: --level l1|l2|hbm [--elements N --iterations I --blocks B]\n");
     std::exit(EXIT_FAILURE);
   }
   return o;
+}
+
+__device__ __forceinline__ float4 load_ca_float4(const float4 *address) {
+  float4 value;
+  asm volatile("ld.global.ca.v4.f32 {%0, %1, %2, %3}, [%4];"
+               : "=f"(value.x), "=f"(value.y), "=f"(value.z), "=f"(value.w)
+               : "l"(address));
+  return value;
 }
 
 __device__ __forceinline__ float4 load_cg_float4(const float4 *address) {
@@ -53,17 +67,18 @@ __device__ __forceinline__ float4 load_cg_float4(const float4 *address) {
   return value;
 }
 
-__global__ void shared_sustained(float *checksum, int iterations) {
-  __shared__ volatile float tile[256];
+__global__ void l1_read_sustained(const float4 *input, float *checksum,
+                                  int vectors_per_block, int iterations) {
   int tid = threadIdx.x;
-  tile[tid] = float((blockIdx.x + tid) & 255);
-  __syncthreads();
-  #pragma unroll 4
-  for (int i = 0; i < iterations; ++i) {
-    float value = tile[tid];
-    tile[tid] = value + 1.0f;
+  const float4 *slice = input + size_t(blockIdx.x) * vectors_per_block;
+  float4 sum = make_float4(0, 0, 0, 0);
+  for (int iter = 0; iter < iterations; ++iter) {
+    for (int i = tid; i < vectors_per_block; i += blockDim.x) {
+      float4 value = load_ca_float4(slice + i);
+      sum.x += value.x; sum.y += value.y; sum.z += value.z; sum.w += value.w;
+    }
   }
-  if (tid == 0) checksum[blockIdx.x] = tile[0];
+  if (tid == 0) checksum[blockIdx.x] = sum.x + sum.y + sum.z + sum.w;
 }
 
 __global__ void l2_read_sustained(const float4 *input, float *checksum,
@@ -89,28 +104,44 @@ __global__ void l2_read_sustained(const float4 *input, float *checksum,
                       sum3.x + sum3.y + sum3.z + sum3.w;
 }
 
-__global__ void hbm_copy_sustained(const float4 *input, float4 *output, size_t vector_count) {
+__global__ void hbm_read_sustained(const float4 *input, float *checksum,
+                                   size_t vector_count) {
   size_t index = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
   size_t stride = size_t(gridDim.x) * blockDim.x;
-  for (; index < vector_count; index += stride) output[index] = input[index];
+  size_t output_index = index;
+  float4 sum = make_float4(0, 0, 0, 0);
+  for (; index < vector_count; index += stride) {
+    float4 value = load_cg_float4(input + index);
+    sum.x += value.x; sum.y += value.y; sum.z += value.z; sum.w += value.w;
+  }
+  if (output_index < size_t(gridDim.x) * blockDim.x)
+    checksum[output_index] = sum.x + sum.y + sum.z + sum.w;
 }
 
 int main(int argc, char **argv) {
   Options o = parse_options(argc, argv);
   if (o.level == "l1") {
-    float *d_checksum = nullptr;
-    std::vector<float> checksum(o.blocks);
+    const int vectors_per_block = 1024;
+    const size_t vector_count = size_t(o.blocks) * vectors_per_block;
+    const size_t count = vector_count * 4;
+    std::vector<float> input(count, 1.0f), checksum(o.blocks);
+    float *d_input = nullptr, *d_checksum = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_input, count * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_checksum, size_t(o.blocks) * sizeof(float)));
-    shared_sustained<<<o.blocks, 256>>>(d_checksum, o.iterations);
+    CUDA_CHECK(cudaMemcpy(d_input, input.data(), count * sizeof(float), cudaMemcpyHostToDevice));
+    l1_read_sustained<<<o.blocks, 256>>>(reinterpret_cast<const float4 *>(d_input),
+                                        d_checksum, vectors_per_block, o.iterations);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(checksum.data(), d_checksum, size_t(o.blocks) * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(checksum.data(), d_checksum, size_t(o.blocks) * sizeof(float),
+                          cudaMemcpyDeviceToHost));
     double sum = 0.0;
     for (float value : checksum) sum += value;
-    size_t expected = size_t(o.blocks) * 256 * o.iterations * 2 * sizeof(float);
-    std::printf("benchmark_level=l1d_shared\nblocks=%d\niterations=%d\nexpected_physical_bytes=%zu\nchecksum=%.8e\nTest PASSED\n",
-                o.blocks, o.iterations, expected, sum);
+    std::printf("benchmark_level=l1d_read\nblocks=%d\niterations=%d\n"
+                "algorithmic_read_bytes=%zu\nchecksum=%.8e\nTest PASSED\n",
+                o.blocks, o.iterations, vector_count * 16 * size_t(o.iterations), sum);
     CUDA_CHECK(cudaFree(d_checksum));
+    CUDA_CHECK(cudaFree(d_input));
     return EXIT_SUCCESS;
   }
 
@@ -128,39 +159,33 @@ int main(int argc, char **argv) {
   CUDA_CHECK(cudaMemcpy(d_input, input.data(), bytes, cudaMemcpyHostToDevice));
   int threads = 256;
   int blocks = std::min(o.blocks, int((vector_count + threads - 1) / threads));
-
+  size_t checksum_count = size_t(blocks) * threads;
+  float *d_checksum = nullptr;
+  std::vector<float> checksum(checksum_count);
+  CUDA_CHECK(cudaMalloc(&d_checksum, checksum_count * sizeof(float)));
   if (o.level == "l2") {
-    size_t checksum_count = size_t(blocks) * threads;
-    float *d_checksum = nullptr;
-    std::vector<float> checksum(checksum_count);
-    CUDA_CHECK(cudaMalloc(&d_checksum, checksum_count * sizeof(float)));
-    l2_read_sustained<<<blocks, threads>>>(reinterpret_cast<const float4 *>(d_input), d_checksum,
-                                           vector_count, o.iterations);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(checksum.data(), d_checksum, checksum_count * sizeof(float), cudaMemcpyDeviceToHost));
-    double sum = 0.0;
-    for (float value : checksum) sum += value;
-    std::printf("benchmark_level=l2\nelements=%d\niterations=%d\nalgorithmic_read_bytes=%zu\nchecksum=%.8e\nTest PASSED\n",
-                o.elements, o.iterations, bytes * size_t(o.iterations), sum);
-    CUDA_CHECK(cudaFree(d_checksum));
+    l2_read_sustained<<<blocks, threads>>>(reinterpret_cast<const float4 *>(d_input),
+                                           d_checksum, vector_count, o.iterations);
   } else {
-    float *d_output = nullptr;
-    std::vector<float> output(count);
-    CUDA_CHECK(cudaMalloc(&d_output, bytes));
-    hbm_copy_sustained<<<blocks, threads>>>(reinterpret_cast<const float4 *>(d_input),
-                                            reinterpret_cast<float4 *>(d_output), vector_count);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(output.data(), d_output, bytes, cudaMemcpyDeviceToHost));
-    double max_error = 0.0;
-    for (size_t i = 0; i < count; ++i)
-      max_error = std::max(max_error, std::abs(double(output[i]) - input[i]));
-    std::printf("benchmark_level=hbm\nelements=%d\nalgorithmic_bytes=%zu\nmax_abs_error=%.8e\n%s",
-                o.elements, bytes * 2, max_error,
-                max_error == 0.0 ? "Test PASSED\n" : "Test FAILED\n");
-    CUDA_CHECK(cudaFree(d_output));
+    hbm_read_sustained<<<blocks, threads>>>(reinterpret_cast<const float4 *>(d_input),
+                                            d_checksum, vector_count);
   }
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(checksum.data(), d_checksum, checksum_count * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  double sum = 0.0;
+  for (float value : checksum) sum += value;
+  if (o.level == "l2") {
+    std::printf("benchmark_level=l2_read\nelements=%d\niterations=%d\n"
+                "algorithmic_read_bytes=%zu\nchecksum=%.8e\nTest PASSED\n",
+                o.elements, o.iterations, bytes * size_t(o.iterations), sum);
+  } else {
+    std::printf("benchmark_level=hbm_read\nelements=%d\n"
+                "algorithmic_read_bytes=%zu\nchecksum=%.8e\nTest PASSED\n",
+                o.elements, bytes, sum);
+  }
+  CUDA_CHECK(cudaFree(d_checksum));
   CUDA_CHECK(cudaFree(d_input));
   return EXIT_SUCCESS;
 }

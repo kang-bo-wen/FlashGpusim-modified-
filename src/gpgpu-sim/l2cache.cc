@@ -47,7 +47,6 @@
 #include "gpu-sim.h"
 #include "histogram.h"
 #include "l2cache.h"
-#include "roofline_stats.h"
 #include "l2cache_trace.h"
 #include "mem_fetch.h"
 #include "mem_latency_stat.h"
@@ -670,12 +669,6 @@ void memory_sub_partition::process_l2_access_result(
                             m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,
                             m_id, mf, cache_request_status_str(status));
   }
-  if (status != RESERVATION_FAIL) {
-    const bool writeback = mf->get_access_type() == L1_WRBK_ACC ||
-                           mf->get_access_type() == L2_WRBK_ACC;
-    roofline_stats::add_l2(mf->is_write(), writeback,
-                           mf->get_data_size());
-  }
   const bool write_sent = was_write_sent(events);
   const bool read_sent = was_read_sent(events);
   MEM_SUBPART_GPPRINTF("Probing L2 cache Address=%llx, status=%u\n",
@@ -920,7 +913,9 @@ void memory_sub_partition::service_l2_requests_multi_issue() {
       }
       if (status == HIT) {
         const unsigned accepted =
-            m_l2_multi_issue_ports.accept_data(1, L2_MULTI_ISSUE_HIT_DATA);
+            m_l2_multi_issue_ports.accept_data(
+                1, mf->is_write() ? L2_MULTI_ISSUE_WRITE_HIT_DATA
+                                  : L2_MULTI_ISSUE_READ_HIT_DATA);
         assert(accepted == 1);
         assert(deferred_writeback == NULL);
       }
