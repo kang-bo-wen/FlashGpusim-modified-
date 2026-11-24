@@ -1,0 +1,5 @@
+/transpose
+/runs-*/
+/smoke-runs-*/
+*.log
+__pycache__/
